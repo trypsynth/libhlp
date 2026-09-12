@@ -71,11 +71,8 @@ impl Phrases {
 		let count = usize::from(count);
 		// WinHelp 3.0 has no decompressed-size field: the text is stored as it stands, so
 		// its length is whatever the file has left after the offset array.
-		let decompressed = if uncompressed {
-			0
-		} else {
-			r.u32().map_err(|_| HlpError::BadPhrases("truncated header"))? as usize
-		};
+		let decompressed =
+			if uncompressed { 0 } else { r.u32().map_err(|_| HlpError::BadPhrases("truncated header"))? as usize };
 		if mvb {
 			r.skip(MVB_GAP)?;
 		}
@@ -103,15 +100,11 @@ impl Phrases {
 		let entries = r.u32().map_err(|_| HlpError::BadPhrases("truncated |PhrIndex header"))?;
 		r.skip(4).map_err(|_| HlpError::BadPhrases("truncated |PhrIndex header"))?;
 		let image_size = r.u32().map_err(|_| HlpError::BadPhrases("truncated |PhrIndex header"))? as usize;
-		let image_compressed_size =
-			r.u32().map_err(|_| HlpError::BadPhrases("truncated |PhrIndex header"))? as usize;
+		let image_compressed_size = r.u32().map_err(|_| HlpError::BadPhrases("truncated |PhrIndex header"))? as usize;
 		r.skip(4).map_err(|_| HlpError::BadPhrases("truncated |PhrIndex header"))?;
 		let bits = u32::from(r.u16().map_err(|_| HlpError::BadPhrases("truncated |PhrIndex header"))? & 0xf);
-		let text = if image_size == image_compressed_size {
-			image.to_vec()
-		} else {
-			lz77::decompress(image, image_size)
-		};
+		let text =
+			if image_size == image_compressed_size { image.to_vec() } else { lz77::decompress(image, image_size) };
 		let entries = entries.min(u32::try_from(image_size.max(1)).unwrap_or(u32::MAX)) as usize;
 		let mut reader = BitReader::new(index, PHRINDEX_HEADER_LEN);
 		let mut offsets = Vec::with_capacity(entries + 1);
@@ -143,7 +136,11 @@ impl Phrases {
 	/// Expand one `LinkData2` stream, substituting phrases for their codes.
 	pub fn expand(&self, input: &[u8], expected: usize) -> Vec<u8> {
 		let mut out = Vec::with_capacity(expected);
-		if self.hall { self.expand_hall(input, &mut out) } else { self.expand_old(input, &mut out) }
+		if self.hall {
+			self.expand_hall(input, &mut out);
+		} else {
+			self.expand_old(input, &mut out);
+		}
 		out
 	}
 

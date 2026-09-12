@@ -6,7 +6,7 @@
 
 use std::{env, process};
 
-use libhlp::HlpFile;
+use libhlp::{HlpFile, Run};
 
 fn main() {
 	let Some(path) = env::args().nth(1) else {
@@ -32,6 +32,25 @@ fn main() {
 			for topic in &topics {
 				println!("=== [{}] {} (offset {}) ===", topic.number, topic.title, topic.offset);
 				println!("{}", topic.text());
+				for paragraph in &topic.paragraphs {
+					for run in &paragraph.runs {
+						if let Run::Text { text, format, .. } = run
+							&& !format.is_plain()
+						{
+							let mut on = String::new();
+							if format.bold {
+								on.push('b');
+							}
+							if format.italic {
+								on.push('i');
+							}
+							if format.underline {
+								on.push('u');
+							}
+							println!("  [{on}] {text:?}");
+						}
+					}
+				}
 				let links: Vec<String> = topic
 					.links()
 					.map(|l| {

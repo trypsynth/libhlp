@@ -5,6 +5,7 @@ use std::{collections::HashMap, fmt, fs, path::Path};
 use crate::{
 	btree::Btree,
 	error::{HlpError, Result},
+	font::Fonts,
 	format::{self, Reader},
 	link::{Link, Target},
 	phrase::Phrases,
@@ -22,6 +23,9 @@ const SYSTEM: &str = "|SYSTEM";
 
 /// The internal file holding topic text.
 const TOPIC: &str = "|TOPIC";
+
+/// The internal file holding the font table.
+const FONT: &str = "|FONT";
 
 /// The internal file holding an old-style phrase table.
 const PHRASES: &str = "|Phrases";
@@ -149,12 +153,20 @@ impl HlpFile {
 	/// help text at all.
 	pub fn topics(&self) -> Result<Vec<Topic>> {
 		let raw = self.read_file(TOPIC)?;
-		let blocks =
-			Blocks::new(raw, self.system.block_size, self.system.decompress_size, self.system.compressed);
+		let blocks = Blocks::new(raw, self.system.block_size, self.system.decompress_size, self.system.compressed);
 		let phrases = self.phrases();
-		let mut topics = topic::walk(&blocks, &phrases);
+		let fonts = self.fonts();
+		let mut topics = topic::walk(&blocks, &phrases, &fonts);
 		self.apply_stored_titles(&mut topics);
 		Ok(topics)
+	}
+
+	/// Load the font table, if the file has a readable one.
+	///
+	/// A file with no `|FONT`, or a damaged one, reads as no emphasis anywhere: that costs
+	/// the caller its bold and italic, not its text.
+	fn fonts(&self) -> Fonts {
+		self.read_file(FONT).ok().and_then(|buf| Fonts::parse(buf).ok()).unwrap_or_default()
 	}
 
 	/// Load whichever phrase table the file uses, if it uses one.
@@ -165,10 +177,7 @@ impl HlpFile {
 		if let (Ok(index), Ok(image)) = (self.read_file(PHRINDEX), self.read_file(PHRIMAGE)) {
 			return Phrases::parse_hall(index, image).unwrap_or_default();
 		}
-		self.read_file(PHRASES)
-			.ok()
-			.and_then(|buf| Phrases::parse_phrases(buf, false).ok())
-			.unwrap_or_default()
+		self.read_file(PHRASES).ok().and_then(|buf| Phrases::parse_phrases(buf, false).ok()).unwrap_or_default()
 	}
 
 	/// Fill in titles from `|TTLBTREE` for topics whose header carried none.

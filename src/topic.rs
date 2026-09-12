@@ -8,6 +8,7 @@
 
 use crate::{
 	error::{HlpError, Result},
+	font::Fonts,
 	format::Reader,
 	link::Link,
 	lz77,
@@ -55,13 +56,10 @@ impl Topic {
 
 	/// Every hotspot in the topic, in reading order.
 	pub fn links(&self) -> impl Iterator<Item = &Link> {
-		self.paragraphs
-			.iter()
-			.flat_map(|p| &p.runs)
-			.filter_map(|run| match run {
-				paragraph::Run::Text { link, .. } => link.as_ref(),
-				_ => None,
-			})
+		self.paragraphs.iter().flat_map(|p| &p.runs).filter_map(|run| match run {
+			paragraph::Run::Text { link, .. } => link.as_ref(),
+			_ => None,
+		})
 	}
 }
 
@@ -110,9 +108,10 @@ impl Blocks {
 			left -= available;
 			// The next block's slot starts one full stride on, no matter how much of this
 			// block was actually used.
-			pos = u32::try_from(index + 1).ok()?.checked_mul(self.stride)?.checked_add(
-				u32::try_from(BLOCK_HEADER_LEN).ok()?,
-			)?;
+			pos = u32::try_from(index + 1)
+				.ok()?
+				.checked_mul(self.stride)?
+				.checked_add(u32::try_from(BLOCK_HEADER_LEN).ok()?)?;
 		}
 	}
 }
@@ -149,7 +148,7 @@ impl TopicLink {
 ///
 /// A record that cannot be read ends the walk, keeping the topics gathered so far, since a
 /// help file with one damaged topic is still worth the rest of its text.
-pub fn walk(blocks: &Blocks, phrases: &Phrases) -> Vec<Topic> {
+pub fn walk(blocks: &Blocks, phrases: &Phrases, fonts: &Fonts) -> Vec<Topic> {
 	let mut topics = Vec::new();
 	let mut current: Option<Topic> = None;
 	let mut pos = u32::try_from(BLOCK_HEADER_LEN).unwrap_or(0);
@@ -188,7 +187,7 @@ pub fn walk(blocks: &Blocks, phrases: &Phrases) -> Vec<Topic> {
 				number += 1;
 			}
 			TL_DISPLAY30 | TL_DISPLAY | TL_TABLE => {
-				let record = paragraph::parse(link.record_type, &data1, &data2);
+				let record = paragraph::parse(link.record_type, &data1, &data2, fonts);
 				offset = offset.saturating_add(record.topic_length);
 				if let Some(topic) = current.as_mut() {
 					topic.paragraphs.extend(record.paragraphs);
@@ -373,7 +372,7 @@ mod tests {
 	fn a_topic_header_followed_by_text_makes_one_topic() {
 		let payload = chain(&[topic_header_parts("Intro"), display_parts("Body text.")]);
 		let b = blocks(&[payload], BLOCK_HEADER_LEN + 512);
-		let topics = walk(&b, &Phrases::default());
+		let topics = walk(&b, &Phrases::default(), &Fonts::default());
 		assert_eq!(topics.len(), 1);
 		assert_eq!(topics[0].title, "Intro");
 		assert_eq!(topics[0].number, FIRST_TOPIC_NUMBER);
@@ -389,7 +388,7 @@ mod tests {
 			display_parts("Two"),
 		]);
 		let b = blocks(&[payload], BLOCK_HEADER_LEN + 1024);
-		let topics = walk(&b, &Phrases::default());
+		let topics = walk(&b, &Phrases::default(), &Fonts::default());
 		assert_eq!(topics.len(), 2);
 		assert_eq!(topics[0].title, "First");
 		assert_eq!(topics[0].text(), "One");
@@ -404,10 +403,13 @@ mod tests {
 	fn several_records_accumulate_into_one_topic() {
 		let payload = chain(&[topic_header_parts("T"), display_parts("First."), display_parts("Second.")]);
 		let b = blocks(&[payload], BLOCK_HEADER_LEN + 512);
-		let topics = walk(&b, &Phrases::default());
+		let topics = walk(&b, &Phrases::default(), &Fonts::default());
 		assert_eq!(topics.len(), 1);
-		assert_eq!(topics[0].text(), "First.
-Second.");
+		assert_eq!(
+			topics[0].text(),
+			"First.
+Second."
+		);
 	}
 
 	// The terminating record carries no data, so a file that is nothing but a terminator
@@ -416,7 +418,7 @@ Second.");
 	fn the_terminating_record_is_not_a_topic() {
 		let payload = chain(&[]);
 		let b = blocks(&[payload], BLOCK_HEADER_LEN + 64);
-		assert!(walk(&b, &Phrases::default()).is_empty());
+		assert!(walk(&b, &Phrases::default(), &Fonts::default()).is_empty());
 	}
 
 	// A next pointer that does not advance would spin forever on a damaged file.
@@ -424,13 +426,13 @@ Second.");
 	fn a_record_pointing_at_itself_ends_the_walk() {
 		let payload = record(TL_TOPICHDR, BLOCK_HEADER_LEN as u32, &[0u8; TOPIC_HEADER_LEN], b"Loop ", 5);
 		let b = blocks(&[payload], BLOCK_HEADER_LEN + 256);
-		assert!(walk(&b, &Phrases::default()).is_empty());
+		assert!(walk(&b, &Phrases::default(), &Fonts::default()).is_empty());
 	}
 
 	#[test]
 	fn an_empty_topic_file_yields_no_topics() {
 		let b = Blocks::new(&[], 512, STRIDE, false);
-		assert!(walk(&b, &Phrases::default()).is_empty());
+		assert!(walk(&b, &Phrases::default(), &Fonts::default()).is_empty());
 	}
 
 	#[test]

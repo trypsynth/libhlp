@@ -119,9 +119,9 @@ impl<'a> Btree<'a> {
 		if n >= self.total_pages {
 			return Err(bad());
 		}
-		let start = HEADER_LEN.checked_add(n.checked_mul(self.page_size).ok_or(HlpError::Overflow)?).ok_or(
-			HlpError::Overflow,
-		)?;
+		let start = HEADER_LEN
+			.checked_add(n.checked_mul(self.page_size).ok_or(HlpError::Overflow)?)
+			.ok_or(HlpError::Overflow)?;
 		let end = start.checked_add(self.page_size).ok_or(HlpError::Overflow)?;
 		// The last page of an internal file can be cut short by UsedSpace, so accept a
 		// partial tail rather than rejecting the whole tree.

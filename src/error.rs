@@ -28,6 +28,9 @@ pub enum HlpError {
 	/// The `|SYSTEM` internal file is missing or malformed.
 	#[error("bad |SYSTEM record: {0}")]
 	BadSystem(&'static str),
+	/// The `|FONT` internal file is malformed.
+	#[error("bad |FONT file: {0}")]
+	BadFont(&'static str),
 	/// The `|TOPIC` internal file is malformed.
 	#[error("bad |TOPIC data: {0}")]
 	BadTopic(&'static str),

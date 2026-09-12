@@ -6,6 +6,7 @@
 //! repeat until the command stream says it is done.
 
 use crate::{
+	font::{Fonts, Format},
 	format::Reader,
 	link::{Link, Target},
 	text,
@@ -26,10 +27,13 @@ pub const TL_TABLE: u8 = 0x23;
 /// One piece of a paragraph.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Run {
-	/// A stretch of text, carrying the hotspot it sits inside if it is in one.
+	/// A stretch of text, carrying its emphasis and the hotspot it sits inside if it is
+	/// in one.
 	Text {
 		/// The text itself, already decoded.
 		text: String,
+		/// The emphasis the text is set in.
+		format: Format,
 		/// Where clicking this text would go, if it is a hotspot.
 		link: Option<Link>,
 	},
@@ -99,17 +103,14 @@ mod settings {
 ///
 /// Malformed command or text streams end the record rather than failing the file: a help
 /// file with one bad topic should still give up the rest of its topics.
-pub fn parse(record_type: u8, data1: &[u8], data2: &[u8]) -> Record {
+pub fn parse(record_type: u8, data1: &[u8], data2: &[u8], fonts: &Fonts) -> Record {
 	let mut cmds = Reader::new(data1);
 	let mut strings = Reader::new(data2);
-	let mut out = Paragraphs::default();
+	let mut out = Paragraphs::new(fonts);
 	// TopicSize, which counts bytes and is of no use once the record is already in hand.
 	let _ = cmds.clong();
-	let topic_length = if matches!(record_type, TL_DISPLAY | TL_TABLE) {
-		u32::from(cmds.cushort().unwrap_or(0))
-	} else {
-		0
-	};
+	let topic_length =
+		if matches!(record_type, TL_DISPLAY | TL_TABLE) { u32::from(cmds.cushort().unwrap_or(0)) } else { 0 };
 	if record_type == TL_TABLE && skip_table_header(&mut cmds).is_none() {
 		return Record { paragraphs: out.finish(), topic_length };
 	}
@@ -191,7 +192,7 @@ fn skip_settings(cmds: &mut Reader<'_>) -> Option<()> {
 /// Read text and commands in lockstep until the end-of-formatting command.
 ///
 /// Returns `None` when either stream runs out, which ends the record.
-fn read_commands(cmds: &mut Reader<'_>, strings: &mut Reader<'_>, out: &mut Paragraphs) -> Option<()> {
+fn read_commands(cmds: &mut Reader<'_>, strings: &mut Reader<'_>, out: &mut Paragraphs<'_>) -> Option<()> {
 	loop {
 		out.push_text(strings.cstr().ok()?);
 		let cmd = cmds.u8().ok()?;
@@ -199,9 +200,12 @@ fn read_commands(cmds: &mut Reader<'_>, strings: &mut Reader<'_>, out: &mut Para
 			0xFF => return Some(()),
 			// vfld and dtype, both media view field references with no text of their own.
 			0x20 => cmds.skip(4).ok()?,
-			// A dtype field reference, and a font change whose font matters only to a
-			// renderer. Both carry one short.
-			0x21 | 0x80 => cmds.skip(2).ok()?,
+			// A dtype field reference, which carries one short and no text.
+			0x21 => cmds.skip(2).ok()?,
+			0x80 => {
+				let font = cmds.u16().ok()?;
+				out.set_font(font);
+			}
 			0x81 => out.push(Run::LineBreak),
 			// Ends a paragraph, not a table cell. A cell ends with the end-of-formatting
 			// command like any other block, and the outer loop picks up the next one.
@@ -277,20 +281,24 @@ fn parse_external(body: &[u8], popup: bool) -> Link {
 		4 | 6 => text::decode_cstr(r.cstr().unwrap_or_default()),
 		_ => String::new(),
 	};
-	let target =
-		if file.is_empty() { Target::Context(context) } else { Target::External { file, context } };
+	let target = if file.is_empty() { Target::Context(context) } else { Target::External { file, context } };
 	Link { target, popup }
 }
 
 /// Collects runs into paragraphs while a record is read.
-#[derive(Default)]
-struct Paragraphs {
+struct Paragraphs<'a> {
+	fonts: &'a Fonts,
 	done: Vec<Paragraph>,
 	current: Paragraph,
 	link: Option<Link>,
+	format: Format,
 }
 
-impl Paragraphs {
+impl<'a> Paragraphs<'a> {
+	fn new(fonts: &'a Fonts) -> Self {
+		Self { fonts, done: Vec::new(), current: Paragraph::default(), link: None, format: Format::default() }
+	}
+
 	fn push(&mut self, run: Run) {
 		self.current.runs.push(run);
 	}
@@ -300,7 +308,18 @@ impl Paragraphs {
 		if bytes.is_empty() {
 			return;
 		}
-		self.push(Run::Text { text: text::decode(bytes), link: self.link.clone() });
+		let mut format = self.format;
+		// WinHelp draws a hotspot by switching to an underlined font, so the underline is
+		// how the link is rendered rather than emphasis the author asked for. Reporting
+		// both would have a reader announce every link twice over.
+		if self.link.is_some() {
+			format.underline = false;
+		}
+		self.push(Run::Text { text: text::decode(bytes), format, link: self.link.clone() });
+	}
+
+	fn set_font(&mut self, font: u16) {
+		self.format = self.fonts.format(font);
 	}
 
 	fn start_link(&mut self, link: Link) {
@@ -344,6 +363,11 @@ mod tests {
 		buf
 	}
 
+	/// Parse a record against an empty font table, for the cases that ignore emphasis.
+	fn plain(record_type: u8, data1: &[u8], data2: &[u8]) -> Record {
+		parse(record_type, data1, data2, &Fonts::default())
+	}
+
 	fn strings(parts: &[&str]) -> Vec<u8> {
 		let mut buf = Vec::new();
 		for part in parts {
@@ -357,7 +381,7 @@ mod tests {
 	fn a_single_paragraph_reads_its_text() {
 		let mut cmds = display_prologue(6);
 		cmds.push(0xFF);
-		let record = parse(TL_DISPLAY, &cmds, &strings(&["Hello."]));
+		let record = plain(TL_DISPLAY, &cmds, &strings(&["Hello."]));
 		assert_eq!(record.topic_length, 6);
 		assert_eq!(record.paragraphs.len(), 1);
 		assert_eq!(record.paragraphs[0].text(), "Hello.");
@@ -371,7 +395,7 @@ mod tests {
 		cmds.push(0x82);
 		cmds.push(0x82);
 		cmds.push(0xFF);
-		let record = parse(TL_DISPLAY, &cmds, &strings(&["One", "Two", "Three"]));
+		let record = plain(TL_DISPLAY, &cmds, &strings(&["One", "Two", "Three"]));
 		let texts: Vec<String> = record.paragraphs.iter().map(Paragraph::text).collect();
 		assert_eq!(texts, ["One", "Two", "Three"]);
 	}
@@ -382,8 +406,67 @@ mod tests {
 		cmds.push(0x83);
 		cmds.push(0x81);
 		cmds.push(0xFF);
-		let record = parse(TL_DISPLAY, &cmds, &strings(&["a", "b", "c"]));
+		let record = plain(TL_DISPLAY, &cmds, &strings(&["a", "b", "c"]));
 		assert_eq!(record.paragraphs[0].text(), "a\tb\nc");
+	}
+
+	/// A font table whose font 1 is bold and font 2 is underlined.
+	fn test_fonts() -> Fonts {
+		let mut buf = Vec::new();
+		buf.extend_from_slice(&0u16.to_le_bytes());
+		buf.extend_from_slice(&3u16.to_le_bytes());
+		buf.extend_from_slice(&8u16.to_le_bytes());
+		buf.extend_from_slice(&8u16.to_le_bytes());
+		for attrs in [0u8, 0x01, 0x04] {
+			buf.push(attrs);
+			buf.extend_from_slice(&[20, 3, 0, 0, 0, 0, 0, 0, 0, 0]);
+		}
+		Fonts::parse(&buf).unwrap()
+	}
+
+	/// The bytes of a font-change command selecting `font`.
+	fn font_change(font: u16) -> [u8; 3] {
+		let b = font.to_le_bytes();
+		[0x80, b[0], b[1]]
+	}
+
+	// Emphasis is not in the text stream at all: it comes from looking the font number up
+	// in |FONT. This is the whole point of reading that file.
+	#[test]
+	fn a_font_change_applies_its_emphasis_to_later_text() {
+		let mut cmds = display_prologue(0);
+		cmds.extend_from_slice(&font_change(1));
+		cmds.extend_from_slice(&font_change(0));
+		cmds.push(0xFF);
+		let record = parse(TL_DISPLAY, &cmds, &strings(&["plain ", "bold ", "plain again"]), &test_fonts());
+		let runs = &record.paragraphs[0].runs;
+		assert_eq!(runs[0], Run::Text { text: "plain ".into(), format: Format::default(), link: None });
+		let bold = Format { bold: true, ..Format::default() };
+		assert_eq!(runs[1], Run::Text { text: "bold ".into(), format: bold, link: None });
+		assert_eq!(runs[2], Run::Text { text: "plain again".into(), format: Format::default(), link: None });
+	}
+
+	// WinHelp draws hotspots by switching to an underlined font. That underline is the
+	// link's rendering, not emphasis, so reporting it would make a reader announce every
+	// link as underlined on top of announcing it as a link.
+	#[test]
+	fn a_hotspots_underline_is_not_reported_as_emphasis() {
+		let mut cmds = display_prologue(0);
+		cmds.extend_from_slice(&font_change(2));
+		cmds.push(0xE3);
+		cmds.extend_from_slice(&7u32.to_le_bytes());
+		cmds.push(0x89);
+		cmds.push(0xFF);
+		// One string is emitted before each command, so the two bare commands ahead of the
+		// hotspot text each consume an empty one.
+		let record = parse(TL_DISPLAY, &cmds, &strings(&["", "", "click", " after"]), &test_fonts());
+		let runs = &record.paragraphs[0].runs;
+		let Run::Text { format, link: Some(_), .. } = &runs[0] else { panic!("expected a hotspot") };
+		assert!(!format.underline);
+		// The font is still underlined once the hotspot ends, so the suppression is scoped
+		// to the link rather than clearing the font.
+		let Run::Text { format, link: None, .. } = &runs[1] else { panic!("expected plain text") };
+		assert!(format.underline);
 	}
 
 	// A font change carries a two byte argument. Miscounting it would make every command
@@ -393,7 +476,7 @@ mod tests {
 		let mut cmds = display_prologue(0);
 		cmds.extend_from_slice(&[0x80, 0x03, 0x00]);
 		cmds.push(0xFF);
-		let record = parse(TL_DISPLAY, &cmds, &strings(&["before", "after"]));
+		let record = plain(TL_DISPLAY, &cmds, &strings(&["before", "after"]));
 		assert_eq!(record.paragraphs[0].text(), "beforeafter");
 	}
 
@@ -404,11 +487,18 @@ mod tests {
 		cmds.extend_from_slice(&0x1234u32.to_le_bytes());
 		cmds.push(0x89);
 		cmds.push(0xFF);
-		let record = parse(TL_DISPLAY, &cmds, &strings(&["see ", "here", " now"]));
+		let record = plain(TL_DISPLAY, &cmds, &strings(&["see ", "here", " now"]));
 		let runs = &record.paragraphs[0].runs;
-		assert_eq!(runs[0], Run::Text { text: "see ".into(), link: None });
-		assert_eq!(runs[1], Run::Text { text: "here".into(), link: Some(Link::jump(Target::Context(0x1234))) });
-		assert_eq!(runs[2], Run::Text { text: " now".into(), link: None });
+		assert_eq!(runs[0], Run::Text { text: "see ".into(), format: Format::default(), link: None });
+		assert_eq!(
+			runs[1],
+			Run::Text {
+				text: "here".into(),
+				format: Format::default(),
+				link: Some(Link::jump(Target::Context(0x1234)))
+			}
+		);
+		assert_eq!(runs[2], Run::Text { text: " now".into(), format: Format::default(), link: None });
 	}
 
 	#[test]
@@ -417,9 +507,12 @@ mod tests {
 		cmds.push(0xE2);
 		cmds.extend_from_slice(&7u32.to_le_bytes());
 		cmds.push(0xFF);
-		let record = parse(TL_DISPLAY, &cmds, &strings(&["", "pop"]));
+		let record = plain(TL_DISPLAY, &cmds, &strings(&["", "pop"]));
 		let expected = Link::popup(Target::Context(7));
-		assert_eq!(record.paragraphs[0].runs[0], Run::Text { text: "pop".into(), link: Some(expected) });
+		assert_eq!(
+			record.paragraphs[0].runs[0],
+			Run::Text { text: "pop".into(), format: Format::default(), link: Some(expected) }
+		);
 	}
 
 	#[test]
@@ -430,9 +523,8 @@ mod tests {
 		cmds.extend_from_slice(&(macro_text.len() as i16).to_le_bytes());
 		cmds.extend_from_slice(macro_text);
 		cmds.push(0xFF);
-		let record = parse(TL_DISPLAY, &cmds, &strings(&["", "click"]));
-		let Run::Text { link: Some(Link { target: Target::Macro(m), .. }), .. } = &record.paragraphs[0].runs[0]
-		else {
+		let record = plain(TL_DISPLAY, &cmds, &strings(&["", "click"]));
+		let Run::Text { link: Some(Link { target: Target::Macro(m), .. }), .. } = &record.paragraphs[0].runs[0] else {
 			panic!("expected a macro hotspot");
 		};
 		assert_eq!(m, "JI(`x.hlp',`topic')");
@@ -448,7 +540,7 @@ mod tests {
 		cmds.extend_from_slice(&(body.len() as i16).to_le_bytes());
 		cmds.extend_from_slice(&body);
 		cmds.push(0xFF);
-		let record = parse(TL_DISPLAY, &cmds, &strings(&["", "go"]));
+		let record = plain(TL_DISPLAY, &cmds, &strings(&["", "go"]));
 		let Run::Text { link: Some(Link { target: Target::External { file, context }, popup }), .. } =
 			&record.paragraphs[0].runs[0]
 		else {
@@ -470,7 +562,7 @@ mod tests {
 		cmds.extend_from_slice(&0x8008u16.to_le_bytes());
 		cmds.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
 		cmds.push(0xFF);
-		let record = parse(TL_DISPLAY, &cmds, &strings(&["before", "after"]));
+		let record = plain(TL_DISPLAY, &cmds, &strings(&["before", "after"]));
 		let runs = &record.paragraphs[0].runs;
 		assert_eq!(runs[1], Run::Image);
 		assert_eq!(record.paragraphs[0].text(), "beforeafter");
@@ -485,7 +577,7 @@ mod tests {
 		cmds.extend_from_slice(&[0, 0, 0, 0]);
 		cmds.extend_from_slice(&0u16.to_le_bytes());
 		cmds.push(0xFF);
-		let record = parse(TL_DISPLAY30, &cmds, &strings(&["Old."]));
+		let record = plain(TL_DISPLAY30, &cmds, &strings(&["Old."]));
 		assert_eq!(record.topic_length, 0);
 		assert_eq!(record.paragraphs[0].text(), "Old.");
 	}
@@ -496,7 +588,7 @@ mod tests {
 	fn a_truncated_command_stream_keeps_what_it_read() {
 		let mut cmds = display_prologue(0);
 		cmds.push(0x82);
-		let record = parse(TL_DISPLAY, &cmds, &strings(&["Kept", "Also kept"]));
+		let record = plain(TL_DISPLAY, &cmds, &strings(&["Kept", "Also kept"]));
 		let texts: Vec<String> = record.paragraphs.iter().map(Paragraph::text).collect();
 		assert_eq!(texts, ["Kept", "Also kept"]);
 	}
@@ -505,7 +597,7 @@ mod tests {
 	fn a_record_with_no_text_yields_no_paragraphs() {
 		let mut cmds = display_prologue(0);
 		cmds.push(0xFF);
-		let record = parse(TL_DISPLAY, &cmds, &strings(&[""]));
+		let record = plain(TL_DISPLAY, &cmds, &strings(&[""]));
 		assert!(record.paragraphs.is_empty());
 	}
 }

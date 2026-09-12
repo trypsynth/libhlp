@@ -7,7 +7,7 @@
 
 #![allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 
-use libhlp::{HlpError, HlpFile, Run, Target, hash};
+use libhlp::{Format, HlpError, HlpFile, Run, Target, hash};
 
 const MAGIC: u32 = 0x0003_5F3F;
 const BTREE_MAGIC: u16 = 0x293B;
@@ -232,11 +232,8 @@ fn a_hotspot_resolves_through_the_context_index() {
 		Part::Header("Details".into()),
 		Part::Display(display_commands(6, &[0xFF]), strings(&["Body."])),
 	]);
-	let files = vec![
-		("|SYSTEM", system_file("Test Help")),
-		("|TOPIC", topic),
-		("|CONTEXT", context_file(&[("details", 20)])),
-	];
+	let files =
+		vec![("|SYSTEM", system_file("Test Help")), ("|TOPIC", topic), ("|CONTEXT", context_file(&[("details", 20)]))];
 	let hlp = HlpFile::from_bytes(build(&files)).unwrap();
 	let topics = hlp.topics().unwrap();
 	let link = topics[0].links().next().expect("the first topic has a hotspot");
@@ -246,19 +243,16 @@ fn a_hotspot_resolves_through_the_context_index() {
 	assert_eq!(topics[1].offset, 20);
 	// Only the hotspot's own text carries the link.
 	let runs = &topics[0].paragraphs[0].runs;
-	assert_eq!(runs[0], Run::Text { text: "See ".into(), link: None });
-	assert!(matches!(&runs[1], Run::Text { text, link: Some(_) } if text == "the details"));
-	assert_eq!(runs[2], Run::Text { text: " below.".into(), link: None });
+	assert_eq!(runs[0], Run::Text { text: "See ".into(), format: Format::default(), link: None });
+	assert!(matches!(&runs[1], Run::Text { text, link: Some(_), .. } if text == "the details"));
+	assert_eq!(runs[2], Run::Text { text: " below.".into(), format: Format::default(), link: None });
 }
 
 #[test]
 fn internal_files_are_listed_and_readable() {
 	let topic = topic_file(&[Part::Header("T".into())]);
-	let files = vec![
-		("|SYSTEM", system_file("Test Help")),
-		("|TOPIC", topic),
-		("|bm0", b"not really a bitmap".to_vec()),
-	];
+	let files =
+		vec![("|SYSTEM", system_file("Test Help")), ("|TOPIC", topic), ("|bm0", b"not really a bitmap".to_vec())];
 	let hlp = HlpFile::from_bytes(build(&files)).unwrap();
 	let mut names: Vec<&str> = hlp.file_names().collect();
 	names.sort_unstable();

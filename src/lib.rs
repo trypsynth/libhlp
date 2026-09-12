@@ -56,6 +56,7 @@
 
 mod btree;
 mod error;
+mod font;
 mod format;
 mod hlp;
 mod link;
@@ -67,6 +68,7 @@ mod text;
 mod topic;
 
 pub use error::{HlpError, Result};
+pub use font::{Font, Fonts, Format};
 pub use hlp::HlpFile;
 pub use link::{Link, Target, hash};
 pub use paragraph::{Paragraph, Run};

@@ -114,12 +114,8 @@ mod tests {
 	#[test]
 	fn a_back_reference_repeats_earlier_output() {
 		// "abc" then copy 3 bytes from 3 back.
-		let stream = encode(&[
-			Item::Literal(b'a'),
-			Item::Literal(b'b'),
-			Item::Literal(b'c'),
-			Item::Match { dist: 2, len: 3 },
-		]);
+		let stream =
+			encode(&[Item::Literal(b'a'), Item::Literal(b'b'), Item::Literal(b'c'), Item::Match { dist: 2, len: 3 }]);
 		assert_eq!(decompress(&stream, 64), b"abcabc");
 	}
 
