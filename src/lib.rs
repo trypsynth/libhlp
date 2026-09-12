@@ -26,8 +26,20 @@
 //! having been compiled from RTF: the paragraph structure is a binary command stream that
 //! this crate walks to recover text and hotspots.
 //!
+//! # What a topic holds
+//!
+//! A [`Topic`] is a sequence of [`Block`]s: paragraphs and tables. A paragraph is a
+//! sequence of [`Run`]s, each a stretch of text with its [`Format`] and the hotspot it
+//! sits inside, a picture, a tab, or a line break. [`Topic::text`] flattens the lot when
+//! the structure is not wanted.
+//!
+//! Emphasis is not stored with the text. A topic says "switch to font 4", and the `|FONT`
+//! table says font 4 is the bold one, so [`Format`] is what that lookup produced. Hotspots
+//! are drawn with an underlined font, and that underline is left out of [`Format`], since
+//! it is how the link is rendered rather than emphasis the author asked for.
+//!
 //! [`HlpFile::read_file`] exposes the raw internal files for anything this crate does not
-//! interpret, such as the bitmaps in `|bmN`.
+//! interpret, including the bitmaps a [`Run::Image`] names.
 //!
 //! # Which files are supported
 //!
@@ -64,6 +76,7 @@ mod lz77;
 mod paragraph;
 mod phrase;
 mod system;
+mod table;
 mod text;
 mod topic;
 
@@ -72,4 +85,5 @@ pub use font::{Font, Fonts, Format};
 pub use hlp::HlpFile;
 pub use link::{Link, Target, hash};
 pub use paragraph::{Paragraph, Run};
+pub use table::{Block, Cell, Row, Table};
 pub use topic::Topic;

@@ -7,7 +7,7 @@
 
 #![allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 
-use libhlp::{Format, HlpError, HlpFile, Run, Target, hash};
+use libhlp::{Block, Format, HlpError, HlpFile, Run, Target, hash};
 
 const MAGIC: u32 = 0x0003_5F3F;
 const BTREE_MAGIC: u16 = 0x293B;
@@ -92,6 +92,7 @@ fn record(kind: u8, next: u32, data1: &[u8], data2: &[u8]) -> Vec<u8> {
 enum Part {
 	Header(String),
 	Display(Vec<u8>, Vec<u8>),
+	Table(Vec<u8>, Vec<u8>),
 }
 
 /// Chain records together and wrap them in one topic block.
@@ -105,6 +106,7 @@ fn topic_file(parts: &[Part]) -> Vec<u8> {
 				(0x02, vec![0u8; TOPIC_HEADER_LEN], data2)
 			}
 			Part::Display(data1, data2) => (0x20, data1.clone(), data2.clone()),
+			Part::Table(data1, data2) => (0x23, data1.clone(), data2.clone()),
 		})
 		.collect();
 	let mut pos = BLOCK_HEADER_LEN as u32;
@@ -135,6 +137,34 @@ fn display_commands(topic_length: u16, commands: &[u8]) -> Vec<u8> {
 	buf.extend_from_slice(&[0, 0, 0, 0]);
 	buf.extend_from_slice(&0u16.to_le_bytes());
 	buf.extend_from_slice(commands);
+	buf
+}
+
+/// `LinkData1` for a two column table row: the table geometry, then one settings block
+/// per cell, each ending with the end-of-formatting command.
+fn table_row(columns: u8) -> Vec<u8> {
+	let mut buf = Vec::new();
+	buf.extend_from_slice(&0x8000u16.to_le_bytes());
+	buf.push(0);
+	buf.push(columns);
+	// Table type 1: fixed width, so no minimum width follows.
+	buf.push(1);
+	for _ in 0..columns {
+		buf.extend_from_slice(&0i16.to_le_bytes());
+		buf.extend_from_slice(&100i16.to_le_bytes());
+	}
+	for column in 0..i16::from(columns) {
+		// The cell's column, an unknown short, and a byte that is always zero.
+		buf.extend_from_slice(&column.to_le_bytes());
+		buf.extend_from_slice(&0i16.to_le_bytes());
+		buf.push(0);
+		// Settings with no optional fields, then straight to end of formatting.
+		buf.extend_from_slice(&[0, 0, 0, 0]);
+		buf.extend_from_slice(&0u16.to_le_bytes());
+		buf.push(0xFF);
+	}
+	// A column of -1 ends the table.
+	buf.extend_from_slice(&(-1i16).to_le_bytes());
 	buf
 }
 
@@ -242,7 +272,7 @@ fn a_hotspot_resolves_through_the_context_index() {
 	assert_eq!(hlp.topic_offset(link), Some(20));
 	assert_eq!(topics[1].offset, 20);
 	// Only the hotspot's own text carries the link.
-	let runs = &topics[0].paragraphs[0].runs;
+	let runs = &topics[0].paragraphs().next().unwrap().runs;
 	assert_eq!(runs[0], Run::Text { text: "See ".into(), format: Format::default(), link: None });
 	assert!(matches!(&runs[1], Run::Text { text, link: Some(_), .. } if text == "the details"));
 	assert_eq!(runs[2], Run::Text { text: " below.".into(), format: Format::default(), link: None });
@@ -273,4 +303,36 @@ fn a_file_with_no_topic_file_reports_it() {
 fn a_file_with_no_system_file_is_rejected() {
 	let topic = topic_file(&[Part::Header("T".into())]);
 	assert!(matches!(HlpFile::from_bytes(build(&[("|TOPIC", topic)])), Err(HlpError::NotFound(_))));
+}
+
+// A table arrives as one record per row, each holding its cells one after another. Reading
+// one back means rebuilding rows from cell column numbers and rejoining the records.
+#[test]
+fn a_table_reads_back_as_rows_and_cells() {
+	let payload = topic_file(&[
+		Part::Header("Grid".into()),
+		Part::Table(table_row(2), strings(&["Name", "Value"])),
+		Part::Table(table_row(2), strings(&["width", "80"])),
+	]);
+	let hlp = HlpFile::from_bytes(build(&[("|SYSTEM", system_file("Test Help")), ("|TOPIC", payload)])).unwrap();
+	let topics = hlp.topics().unwrap();
+	assert_eq!(topics.len(), 1);
+	assert_eq!(topics[0].blocks.len(), 1);
+	let Block::Table(table) = &topics[0].blocks[0] else { panic!("expected a table") };
+	assert_eq!(table.rows.len(), 2);
+	assert_eq!(table.rows[0].cells.len(), 2);
+	assert_eq!(table.rows[0].cells[0].text(), "Name");
+	assert_eq!(table.rows[1].cells[1].text(), "80");
+	assert_eq!(
+		table.text(),
+		"Name	Value
+width	80"
+	);
+	// The flattening views reach into cells as well as loose paragraphs.
+	assert_eq!(
+		topics[0].text(),
+		"Name	Value
+width	80"
+	);
+	assert_eq!(topics[0].paragraphs().count(), 4);
 }

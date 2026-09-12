@@ -9,6 +9,7 @@ use crate::{
 	font::{Fonts, Format},
 	format::Reader,
 	link::{Link, Target},
+	table::{Block, TableBuilder},
 	text,
 };
 
@@ -37,8 +38,14 @@ pub enum Run {
 		/// Where clicking this text would go, if it is a hotspot.
 		link: Option<Link>,
 	},
-	/// A picture, either embedded in the topic or stored as a `|bmN` internal file.
-	Image,
+	/// A picture.
+	///
+	/// `Some(n)` when the bitmap is stored as the internal file `|bmN`, which
+	/// [`HlpFile::read_file`] will hand back. `None` when it is embedded in the topic
+	/// itself, which this crate does not decode.
+	///
+	/// [`HlpFile::read_file`]: crate::HlpFile::read_file
+	Image(Option<u16>),
 	/// A jump to the next tab stop.
 	Tab,
 	/// A forced break that does not start a new paragraph.
@@ -63,7 +70,7 @@ impl Paragraph {
 				Run::Text { text, .. } => out.push_str(text),
 				Run::Tab => out.push('\t'),
 				Run::LineBreak => out.push('\n'),
-				Run::Image => {}
+				Run::Image(_) => {}
 			}
 		}
 		out
@@ -74,12 +81,20 @@ impl Paragraph {
 	pub const fn is_empty(&self) -> bool {
 		self.runs.is_empty()
 	}
+
+	/// Every hotspot in the paragraph, in reading order.
+	pub fn links(&self) -> impl Iterator<Item = &Link> {
+		self.runs.iter().filter_map(|run| match run {
+			Run::Text { link, .. } => link.as_ref(),
+			_ => None,
+		})
+	}
 }
 
 /// What one displayable record contributed.
 pub struct Record {
-	/// The paragraphs it held.
-	pub paragraphs: Vec<Paragraph>,
+	/// The blocks it held: loose paragraphs, or one table.
+	pub blocks: Vec<Block>,
 	/// The record's `TopicLength`, which advances the file's topic offset counter.
 	pub topic_length: u32,
 }
@@ -111,34 +126,38 @@ pub fn parse(record_type: u8, data1: &[u8], data2: &[u8], fonts: &Fonts) -> Reco
 	let _ = cmds.clong();
 	let topic_length =
 		if matches!(record_type, TL_DISPLAY | TL_TABLE) { u32::from(cmds.cushort().unwrap_or(0)) } else { 0 };
-	if record_type == TL_TABLE && skip_table_header(&mut cmds).is_none() {
-		return Record { paragraphs: out.finish(), topic_length };
+	if record_type != TL_TABLE {
+		read_block(&mut cmds, &mut strings, &mut out, data1.len());
+		return Record { blocks: out.finish().into_iter().map(Block::Paragraph).collect(), topic_length };
 	}
-	// Each pass reads one block of paragraph settings and the commands that follow it. A
-	// table has one per cell; every other record has exactly one, and relies on the
-	// end-of-paragraph command to split its text up.
-	for pass in 0.. {
-		if record_type == TL_TABLE {
-			// A column of -1 marks the end of the table rather than another cell.
-			let Ok(column) = Reader::at(data1, cmds.pos()).i16() else { break };
-			if column == -1 {
-				break;
-			}
+	let mut table = TableBuilder::default();
+	if skip_table_header(&mut cmds).is_some() {
+		// Cells run one after another, each opening with the column it sits in. Reading one
+		// leaves the cursor on the next cell's column, or on the -1 that ends the table.
+		while let Ok(column) = Reader::at(data1, cmds.pos()).i16() {
 			// Column, an unknown short, and a byte that is always zero.
-			if cmds.skip(5).is_err() {
+			if column == -1 || cmds.skip(5).is_err() {
 				break;
 			}
-		} else if pass > 0 {
-			break;
-		}
-		if cmds.pos() >= data1.len() || skip_settings(&mut cmds).is_none() {
-			break;
-		}
-		if read_commands(&mut cmds, &mut strings, &mut out).is_none() {
-			break;
+			let read = read_block(&mut cmds, &mut strings, &mut out, data1.len());
+			table.push(column, out.take());
+			if !read {
+				break;
+			}
 		}
 	}
-	Record { paragraphs: out.finish(), topic_length }
+	let table = table.finish();
+	let blocks = if table.rows.is_empty() { Vec::new() } else { vec![Block::Table(table)] };
+	Record { blocks, topic_length }
+}
+
+/// Read one block of paragraph settings and the commands that follow it, up to the
+/// end-of-formatting command. False when either stream ran out first.
+fn read_block(cmds: &mut Reader<'_>, strings: &mut Reader<'_>, out: &mut Paragraphs<'_>, len: usize) -> bool {
+	if cmds.pos() >= len || skip_settings(cmds).is_none() {
+		return false;
+	}
+	read_commands(cmds, strings, out).is_some()
 }
 
 /// Step over a table record's column geometry, which precedes its first cell.
@@ -243,16 +262,36 @@ fn read_commands(cmds: &mut Reader<'_>, strings: &mut Reader<'_>, out: &mut Para
 	}
 }
 
-/// Step over an inline picture, recording that one was there.
-fn skip_picture(cmds: &mut Reader<'_>, out: &mut Paragraphs) -> Option<()> {
+/// A picture command whose payload is a bitmap, rather than an embedded window.
+const PICTURE_HC30: u8 = 0x03;
+
+/// The WinHelp 3.1 form, which counts its hotspots before the bitmap itself.
+const PICTURE_HC31: u8 = 0x22;
+
+/// Step over an inline picture, recording where its bitmap lives.
+///
+/// The payload may be an embedded window, a button, or a media command rather than a
+/// picture. Those are stepped over without a run, since none of them is an image.
+fn skip_picture(cmds: &mut Reader<'_>, out: &mut Paragraphs<'_>) -> Option<()> {
 	let kind = cmds.u8().ok()?;
-	let size = cmds.clong().ok()?;
-	// A WinHelp 3.1 picture states how many hotspots it holds before its data starts.
-	if kind == 0x22 {
+	let size = usize::try_from(cmds.clong().ok()?).unwrap_or(0);
+	if kind == PICTURE_HC31 {
+		// How many hotspots the picture holds. It counts towards topic offsets, which
+		// this crate tracks per record rather than per character.
 		cmds.cushort().ok()?;
 	}
-	cmds.skip(usize::try_from(size).unwrap_or(0)).ok()?;
-	out.push(Run::Image);
+	let payload = cmds.take(size).ok()?;
+	if kind != PICTURE_HC30 && kind != PICTURE_HC31 {
+		return Some(());
+	}
+	// The payload opens with a flag saying whether the bitmap follows inline; when it does
+	// not, the short after it is the number of the `|bmN` file holding it.
+	let embedded = payload.get(..2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+	let number = match embedded {
+		Some(0) => payload.get(2..4).map(|b| u16::from_le_bytes([b[0], b[1]])),
+		_ => None,
+	};
+	out.push(Run::Image(number));
 	Some(())
 }
 
@@ -337,6 +376,20 @@ impl<'a> Paragraphs<'a> {
 		self.done.push(std::mem::take(&mut self.current));
 	}
 
+	/// Take the paragraphs read so far, leaving the collector ready for the next cell.
+	///
+	/// A cell's last paragraph is usually still open, since the end-of-formatting command
+	/// closes the cell rather than the paragraph.
+	fn take(&mut self) -> Vec<Paragraph> {
+		if !self.current.is_empty() {
+			self.done.push(std::mem::take(&mut self.current));
+		}
+		// Nothing carries from one cell into the next.
+		self.link = None;
+		self.format = Format::default();
+		std::mem::take(&mut self.done)
+	}
+
 	fn finish(mut self) -> Vec<Paragraph> {
 		if !self.current.is_empty() {
 			self.done.push(self.current);
@@ -368,6 +421,13 @@ mod tests {
 		parse(record_type, data1, data2, &Fonts::default())
 	}
 
+	impl Record {
+		/// Every paragraph the record produced, table cells included.
+		fn paragraphs(&self) -> Vec<&Paragraph> {
+			self.blocks.iter().flat_map(Block::paragraphs).collect()
+		}
+	}
+
 	fn strings(parts: &[&str]) -> Vec<u8> {
 		let mut buf = Vec::new();
 		for part in parts {
@@ -383,8 +443,8 @@ mod tests {
 		cmds.push(0xFF);
 		let record = plain(TL_DISPLAY, &cmds, &strings(&["Hello."]));
 		assert_eq!(record.topic_length, 6);
-		assert_eq!(record.paragraphs.len(), 1);
-		assert_eq!(record.paragraphs[0].text(), "Hello.");
+		assert_eq!(record.paragraphs().len(), 1);
+		assert_eq!(record.paragraphs()[0].text(), "Hello.");
 	}
 
 	// One record usually holds several paragraphs, split by the end-of-paragraph command
@@ -396,7 +456,7 @@ mod tests {
 		cmds.push(0x82);
 		cmds.push(0xFF);
 		let record = plain(TL_DISPLAY, &cmds, &strings(&["One", "Two", "Three"]));
-		let texts: Vec<String> = record.paragraphs.iter().map(Paragraph::text).collect();
+		let texts: Vec<String> = record.paragraphs().into_iter().map(Paragraph::text).collect();
 		assert_eq!(texts, ["One", "Two", "Three"]);
 	}
 
@@ -407,7 +467,7 @@ mod tests {
 		cmds.push(0x81);
 		cmds.push(0xFF);
 		let record = plain(TL_DISPLAY, &cmds, &strings(&["a", "b", "c"]));
-		assert_eq!(record.paragraphs[0].text(), "a\tb\nc");
+		assert_eq!(record.paragraphs()[0].text(), "a\tb\nc");
 	}
 
 	/// A font table whose font 1 is bold and font 2 is underlined.
@@ -439,7 +499,7 @@ mod tests {
 		cmds.extend_from_slice(&font_change(0));
 		cmds.push(0xFF);
 		let record = parse(TL_DISPLAY, &cmds, &strings(&["plain ", "bold ", "plain again"]), &test_fonts());
-		let runs = &record.paragraphs[0].runs;
+		let runs = &record.paragraphs()[0].runs;
 		assert_eq!(runs[0], Run::Text { text: "plain ".into(), format: Format::default(), link: None });
 		let bold = Format { bold: true, ..Format::default() };
 		assert_eq!(runs[1], Run::Text { text: "bold ".into(), format: bold, link: None });
@@ -460,7 +520,7 @@ mod tests {
 		// One string is emitted before each command, so the two bare commands ahead of the
 		// hotspot text each consume an empty one.
 		let record = parse(TL_DISPLAY, &cmds, &strings(&["", "", "click", " after"]), &test_fonts());
-		let runs = &record.paragraphs[0].runs;
+		let runs = &record.paragraphs()[0].runs;
 		let Run::Text { format, link: Some(_), .. } = &runs[0] else { panic!("expected a hotspot") };
 		assert!(!format.underline);
 		// The font is still underlined once the hotspot ends, so the suppression is scoped
@@ -477,7 +537,7 @@ mod tests {
 		cmds.extend_from_slice(&[0x80, 0x03, 0x00]);
 		cmds.push(0xFF);
 		let record = plain(TL_DISPLAY, &cmds, &strings(&["before", "after"]));
-		assert_eq!(record.paragraphs[0].text(), "beforeafter");
+		assert_eq!(record.paragraphs()[0].text(), "beforeafter");
 	}
 
 	#[test]
@@ -488,7 +548,7 @@ mod tests {
 		cmds.push(0x89);
 		cmds.push(0xFF);
 		let record = plain(TL_DISPLAY, &cmds, &strings(&["see ", "here", " now"]));
-		let runs = &record.paragraphs[0].runs;
+		let runs = &record.paragraphs()[0].runs;
 		assert_eq!(runs[0], Run::Text { text: "see ".into(), format: Format::default(), link: None });
 		assert_eq!(
 			runs[1],
@@ -510,7 +570,7 @@ mod tests {
 		let record = plain(TL_DISPLAY, &cmds, &strings(&["", "pop"]));
 		let expected = Link::popup(Target::Context(7));
 		assert_eq!(
-			record.paragraphs[0].runs[0],
+			record.paragraphs()[0].runs[0],
 			Run::Text { text: "pop".into(), format: Format::default(), link: Some(expected) }
 		);
 	}
@@ -524,7 +584,8 @@ mod tests {
 		cmds.extend_from_slice(macro_text);
 		cmds.push(0xFF);
 		let record = plain(TL_DISPLAY, &cmds, &strings(&["", "click"]));
-		let Run::Text { link: Some(Link { target: Target::Macro(m), .. }), .. } = &record.paragraphs[0].runs[0] else {
+		let Run::Text { link: Some(Link { target: Target::Macro(m), .. }), .. } = &record.paragraphs()[0].runs[0]
+		else {
 			panic!("expected a macro hotspot");
 		};
 		assert_eq!(m, "JI(`x.hlp',`topic')");
@@ -542,7 +603,7 @@ mod tests {
 		cmds.push(0xFF);
 		let record = plain(TL_DISPLAY, &cmds, &strings(&["", "go"]));
 		let Run::Text { link: Some(Link { target: Target::External { file, context }, popup }), .. } =
-			&record.paragraphs[0].runs[0]
+			&record.paragraphs()[0].runs[0]
 		else {
 			panic!("expected an external jump");
 		};
@@ -551,21 +612,65 @@ mod tests {
 		assert!(!popup);
 	}
 
+	/// A picture command carrying `payload`, whose size is a compressed long.
+	fn picture(kind: u8, payload: &[u8]) -> Vec<u8> {
+		let mut out = vec![0x86, kind];
+		let size = ((payload.len() as u16) + 0x4000) * 2;
+		out.extend_from_slice(&size.to_le_bytes());
+		out.extend_from_slice(payload);
+		out
+	}
+
 	// A picture states its own size, and the reader has to jump the whole thing or every
 	// later command reads picture bytes as commands.
 	#[test]
 	fn a_picture_is_stepped_over_and_recorded() {
 		let mut cmds = display_prologue(0);
-		cmds.push(0x86);
-		cmds.push(0x03);
-		// A compressed long of 4, in the two byte form: (4 + 0x4000) * 2.
-		cmds.extend_from_slice(&0x8008u16.to_le_bytes());
-		cmds.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+		// Not embedded, so the short after the flag is the |bmN file number.
+		cmds.extend_from_slice(&picture(0x03, &[0, 0, 3, 0]));
 		cmds.push(0xFF);
 		let record = plain(TL_DISPLAY, &cmds, &strings(&["before", "after"]));
-		let runs = &record.paragraphs[0].runs;
-		assert_eq!(runs[1], Run::Image);
-		assert_eq!(record.paragraphs[0].text(), "beforeafter");
+		assert_eq!(record.paragraphs()[0].runs[1], Run::Image(Some(3)));
+		assert_eq!(record.paragraphs()[0].text(), "beforeafter");
+	}
+
+	// A bitmap stored inline has no |bmN file to point at, and this crate does not decode
+	// the bytes, so the run says a picture was there and nothing more.
+	#[test]
+	fn an_embedded_picture_has_no_file_number() {
+		let mut cmds = display_prologue(0);
+		cmds.extend_from_slice(&picture(0x03, &[1, 0, 0xde, 0xad]));
+		cmds.push(0xFF);
+		let record = plain(TL_DISPLAY, &cmds, &strings(&["", ""]));
+		assert_eq!(record.paragraphs()[0].runs[0], Run::Image(None));
+	}
+
+	// The same commands also carry embedded windows, buttons and media clips. None of them
+	// is a picture, so none should turn up as one.
+	#[test]
+	fn an_embedded_window_is_not_reported_as_a_picture() {
+		let mut cmds = display_prologue(0);
+		cmds.extend_from_slice(&picture(0x05, &[0, 0, 0, 0, 0, 0, b'x', 0]));
+		cmds.push(0xFF);
+		let record = plain(TL_DISPLAY, &cmds, &strings(&["text", ""]));
+		let expected = Run::Text { text: "text".into(), format: Format::default(), link: None };
+		assert_eq!(record.paragraphs()[0].runs, vec![expected]);
+	}
+
+	// The 3.1 form counts its hotspots between the size and the payload. Missing that field
+	// shifts the payload and loses the bitmap number.
+	#[test]
+	fn the_31_picture_form_skips_its_hotspot_count() {
+		let mut cmds = display_prologue(0);
+		let mut pic = vec![0x86, 0x22];
+		pic.extend_from_slice(&((4u16 + 0x4000) * 2).to_le_bytes());
+		// A compressed unsigned short of 2, then the payload.
+		pic.push(4);
+		pic.extend_from_slice(&[0, 0, 7, 0]);
+		cmds.extend_from_slice(&pic);
+		cmds.push(0xFF);
+		let record = plain(TL_DISPLAY, &cmds, &strings(&["", ""]));
+		assert_eq!(record.paragraphs()[0].runs[0], Run::Image(Some(7)));
 	}
 
 	// A WinHelp 3.0 record has no topic length field, so reading one would eat a byte of
@@ -579,7 +684,7 @@ mod tests {
 		cmds.push(0xFF);
 		let record = plain(TL_DISPLAY30, &cmds, &strings(&["Old."]));
 		assert_eq!(record.topic_length, 0);
-		assert_eq!(record.paragraphs[0].text(), "Old.");
+		assert_eq!(record.paragraphs()[0].text(), "Old.");
 	}
 
 	// A record whose commands run out mid-stream still yields the text already decoded,
@@ -589,7 +694,7 @@ mod tests {
 		let mut cmds = display_prologue(0);
 		cmds.push(0x82);
 		let record = plain(TL_DISPLAY, &cmds, &strings(&["Kept", "Also kept"]));
-		let texts: Vec<String> = record.paragraphs.iter().map(Paragraph::text).collect();
+		let texts: Vec<String> = record.paragraphs().into_iter().map(Paragraph::text).collect();
 		assert_eq!(texts, ["Kept", "Also kept"]);
 	}
 
@@ -598,6 +703,6 @@ mod tests {
 		let mut cmds = display_prologue(0);
 		cmds.push(0xFF);
 		let record = plain(TL_DISPLAY, &cmds, &strings(&[""]));
-		assert!(record.paragraphs.is_empty());
+		assert!(record.paragraphs().is_empty());
 	}
 }

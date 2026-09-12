@@ -32,17 +32,36 @@ There is a worked example in `examples/dump.rs`:
 cargo run --example dump -- manual.hlp
 ```
 
-### Runs and links
+### Blocks, runs and links
 
-`Topic::text` flattens a topic. To keep the structure, walk the paragraphs yourself:
+`Topic::text` flattens a topic. To keep the structure, walk its blocks:
+
+```rust
+use libhlp::Block;
+
+for block in &topic.blocks {
+    match block {
+        Block::Paragraph(p) => println!("{}", p.text()),
+        Block::Table(t) => {
+            for row in &t.rows {
+                let cells: Vec<String> = row.cells.iter().map(|c| c.text()).collect();
+                println!("{}", cells.join(" | "));
+            }
+        }
+    }
+}
+```
+
+`Topic::paragraphs` walks every paragraph in reading order, table cells included, so the
+runs inside can be read without caring which block they came from:
 
 ```rust
 use libhlp::{Run, Target};
 
-for paragraph in &topic.paragraphs {
+for paragraph in topic.paragraphs() {
     for run in &paragraph.runs {
         match run {
-            Run::Text { text, link: Some(link) } => match &link.target {
+            Run::Text { text, link: Some(link), .. } => match &link.target {
                 Target::Context(_) => match hlp.topic_offset(link) {
                     Some(offset) => println!("{text} -> topic at {offset}"),
                     None => println!("{text} -> unresolved"),
@@ -50,14 +69,34 @@ for paragraph in &topic.paragraphs {
                 Target::External { file, .. } => println!("{text} -> {file}"),
                 other => println!("{text} -> {other:?}"),
             },
+            Run::Text { text, format, .. } if format.bold => print!("**{text}**"),
             Run::Text { text, .. } => print!("{text}"),
-            Run::Tab => print!("\t"),
+            Run::Tab => print!("	"),
             Run::LineBreak => println!(),
-            Run::Image => print!("[image]"),
+            Run::Image(number) => print!("[image {number:?}]"),
         }
     }
 }
 ```
+
+### Emphasis
+
+Emphasis is not stored with the text. A topic says "switch to font 4", and the `|FONT`
+table says font 4 is the bold one, so `Format` is the result of that lookup.
+
+WinHelp draws a hotspot by switching to an underlined font. That underline is the link's
+rendering rather than emphasis the author asked for, so it is left out of `Format` on text
+that carries a link. The link itself is still there.
+
+### Pictures
+
+`Run::Image(Some(n))` means the bitmap is the internal file `|bmN`, which `read_file`
+hands back as stored, in WinHelp's own `lP` picture format. `Run::Image(None)` means it
+was embedded in the topic, which this crate does not decode. Embedded windows, buttons and
+media clips share the same command but are not pictures, and produce no run.
+
+### Link targets
+
 
 WinHelp does not store a link's destination as a topic offset. It stores the hash of the target's context string, so `HlpFile::topic_offset` looks that up in the file's `|CONTEXT` index. `libhlp::hash` computes the same value from a context string, for finding a topic whose name you already know.
 
@@ -85,7 +124,7 @@ WinHelp 3.0 uses a different topic layout and is not read yet.
 
 Files from Borland's help compiler and MS-DOS QuickHelp share the `.hlp` extension but are unrelated formats. They are rejected with `HlpError::BadMagic`.
 
-What is read: topic text, topic titles, paragraph and line structure, tab stops, hotspots and their targets, picture positions, and the file's own metadata. What is not: font and colour formatting, table geometry, keyword indexes, and the contents of embedded pictures. The raw bytes for all of it are still reachable through `read_file`.
+What is read: topic text and titles, paragraph and line structure, tables as rows and cells, tab stops, bold/italic/underline/strikeout/small caps, hotspots and their targets, which bitmap each picture uses, and the file's own metadata. What is not: colours, point sizes, table column widths, keyword indexes, and the pixels inside a picture. The raw bytes for all of it are still reachable through `read_file`.
 
 ## Text encoding
 

@@ -6,7 +6,7 @@
 
 use std::{env, process};
 
-use libhlp::{HlpFile, Run};
+use libhlp::{Block, HlpFile, Run};
 
 fn main() {
 	let Some(path) = env::args().nth(1) else {
@@ -32,8 +32,20 @@ fn main() {
 			for topic in &topics {
 				println!("=== [{}] {} (offset {}) ===", topic.number, topic.title, topic.offset);
 				println!("{}", topic.text());
-				for paragraph in &topic.paragraphs {
+				for block in &topic.blocks {
+					if let Block::Table(t) = block {
+						println!("  <table {} rows>", t.rows.len());
+						for row in &t.rows {
+							let cells: Vec<String> = row.cells.iter().map(libhlp::Cell::text).collect();
+							println!("    | {}", cells.join(" | "));
+						}
+					}
+				}
+				for paragraph in topic.paragraphs() {
 					for run in &paragraph.runs {
+						if let Run::Image(number) = run {
+							println!("  <image {number:?}>");
+						}
 						if let Run::Text { text, format, .. } = run
 							&& !format.is_plain()
 						{

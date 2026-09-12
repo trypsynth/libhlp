@@ -14,6 +14,7 @@ use crate::{
 	lz77,
 	paragraph::{self, Paragraph, TL_DISPLAY, TL_DISPLAY30, TL_TABLE, TL_TOPICHDR},
 	phrase::Phrases,
+	table::Block,
 	text,
 };
 
@@ -44,22 +45,25 @@ pub struct Topic {
 	pub offset: u32,
 	/// Title from the `$` footnote, empty if the author set none.
 	pub title: String,
-	/// The topic's text, in reading order.
-	pub paragraphs: Vec<Paragraph>,
+	/// The topic's contents, in reading order.
+	pub blocks: Vec<Block>,
 }
 
 impl Topic {
-	/// The topic's whole text, one paragraph per line.
+	/// The topic's whole text, one block per line.
+	#[must_use]
 	pub fn text(&self) -> String {
-		self.paragraphs.iter().map(Paragraph::text).collect::<Vec<_>>().join("\n")
+		self.blocks.iter().map(Block::text).collect::<Vec<_>>().join("\n")
+	}
+
+	/// Every paragraph in the topic, table cells included, in reading order.
+	pub fn paragraphs(&self) -> impl Iterator<Item = &Paragraph> {
+		self.blocks.iter().flat_map(Block::paragraphs)
 	}
 
 	/// Every hotspot in the topic, in reading order.
 	pub fn links(&self) -> impl Iterator<Item = &Link> {
-		self.paragraphs.iter().flat_map(|p| &p.runs).filter_map(|run| match run {
-			paragraph::Run::Text { link, .. } => link.as_ref(),
-			_ => None,
-		})
+		self.paragraphs().flat_map(Paragraph::links)
 	}
 }
 
@@ -178,19 +182,15 @@ pub fn walk(blocks: &Blocks, phrases: &Phrases, fonts: &Fonts) -> Vec<Topic> {
 			// claims, and treating it as one would end the topic that is open.
 			TL_TOPICHDR if data1.len() >= TOPIC_HEADER_LEN => {
 				topics.extend(current.take());
-				current = Some(Topic {
-					number,
-					offset,
-					title: text::decode_cstr(topic_title(&data2)),
-					paragraphs: Vec::new(),
-				});
+				current =
+					Some(Topic { number, offset, title: text::decode_cstr(topic_title(&data2)), blocks: Vec::new() });
 				number += 1;
 			}
 			TL_DISPLAY30 | TL_DISPLAY | TL_TABLE => {
 				let record = paragraph::parse(link.record_type, &data1, &data2, fonts);
 				offset = offset.saturating_add(record.topic_length);
 				if let Some(topic) = current.as_mut() {
-					topic.paragraphs.extend(record.paragraphs);
+					append_blocks(&mut topic.blocks, record.blocks);
 				}
 			}
 			_ => {}
@@ -200,6 +200,19 @@ pub fn walk(blocks: &Blocks, phrases: &Phrases, fonts: &Fonts) -> Vec<Topic> {
 	}
 	topics.extend(current);
 	topics
+}
+
+/// Add a record's blocks to a topic, joining a table onto the one before it.
+///
+/// The help compiler emits one record per table row, so a ten row table arrives as ten
+/// one-row tables. Rejoining them here is what makes a table read as a table.
+fn append_blocks(blocks: &mut Vec<Block>, incoming: Vec<Block>) {
+	for block in incoming {
+		match (blocks.last_mut(), block) {
+			(Some(Block::Table(open)), Block::Table(next)) => open.rows.extend(next.rows),
+			(_, block) => blocks.push(block),
+		}
+	}
 }
 
 /// Read one of a record's two data streams, whose stored length is `total` less `header`.
