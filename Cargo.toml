@@ -1,0 +1,31 @@
+[package]
+name = "libhlp"
+version = "0.1.0"
+description = "Pure-Rust reader for WinHelp (.hlp) files, with LZ77 and phrase decompression."
+edition = "2024"
+rust-version = "1.87"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/trypsynth/libhlp"
+homepage = "https://github.com/trypsynth/libhlp"
+documentation = "https://docs.rs/libhlp"
+keywords = ["winhelp", "hlp", "help", "ebook", "parser"]
+categories = ["parser-implementations", "compression", "filesystem"]
+exclude = [".claude/", "prek.toml", "rustfmt.toml"]
+
+[dependencies]
+thiserror = "2.0.20"
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
