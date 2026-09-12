@@ -40,9 +40,11 @@ pub enum Run {
 	},
 	/// A picture.
 	///
-	/// `Some(n)` when the bitmap is stored as the internal file `|bmN`, which
-	/// [`HlpFile::read_file`] will hand back. `None` when it is embedded in the topic
-	/// itself, which this crate does not decode.
+	/// `Some(n)` when the bitmap is stored as its own internal file, which
+	/// [`HlpFile::read_file`] will hand back. WinHelp 3.1 names that file `|bmN` and
+	/// WinHelp 3.0 names it `bmN`, so a caller that reads the bytes should try both.
+	/// `None` when the bitmap is embedded in the topic itself, which this crate does not
+	/// decode.
 	///
 	/// [`HlpFile::read_file`]: crate::HlpFile::read_file
 	Image(Option<u16>),

@@ -24,8 +24,11 @@ const BLOCK_HEADER_LEN: usize = 12;
 /// Bytes in the header of one record.
 const LINK_LEN: usize = 21;
 
-/// Bytes in a WinHelp 3.1 `TOPICHEADER`, the shortest a header record's `LinkData1` can be.
+/// Bytes in a WinHelp 3.1 `TOPICHEADER`, the shortest a 3.1 header record's data can be.
 const TOPIC_HEADER_LEN: usize = 28;
+
+/// Bytes in a WinHelp 3.0 `TOPICHEADER`, which carries only a size and two topic numbers.
+const TOPIC_HEADER_LEN_30: usize = 12;
 
 /// Topic numbers start here rather than at zero, matching what `|TOMAP` indexes.
 const FIRST_TOPIC_NUMBER: u32 = 16;
@@ -42,6 +45,9 @@ pub struct Topic {
 	/// Sequential topic number, counting from 16 as WinHelp does.
 	pub number: u32,
 	/// Topic offset that identifies this topic as a link target.
+	///
+	/// Only WinHelp 3.1 and later track this. A WinHelp 3.0 file has no topic offsets at
+	/// all, so every topic in one reports zero; use [`Self::number`] to tell them apart.
 	pub offset: u32,
 	/// Title from the `$` footnote, empty if the author set none.
 	pub title: String,
@@ -152,7 +158,8 @@ impl TopicLink {
 ///
 /// A record that cannot be read ends the walk, keeping the topics gathered so far, since a
 /// help file with one damaged topic is still worth the rest of its text.
-pub fn walk(blocks: &Blocks, phrases: &Phrases, fonts: &Fonts) -> Vec<Topic> {
+pub fn walk(blocks: &Blocks, phrases: &Phrases, fonts: &Fonts, before31: bool) -> Vec<Topic> {
+	let header_len = if before31 { TOPIC_HEADER_LEN_30 } else { TOPIC_HEADER_LEN };
 	let mut topics = Vec::new();
 	let mut current: Option<Topic> = None;
 	let mut pos = u32::try_from(BLOCK_HEADER_LEN).unwrap_or(0);
@@ -161,9 +168,14 @@ pub fn walk(blocks: &Blocks, phrases: &Phrases, fonts: &Fonts) -> Vec<Topic> {
 	for _ in 0..MAX_RECORDS {
 		let Some((header, after_header)) = blocks.read(pos, LINK_LEN) else { break };
 		let Ok(link) = TopicLink::parse(&header) else { break };
-		// The last record carries no data and points nowhere. A next pointer that does not
-		// move forward would loop, so it ends the walk too.
-		if link.next == 0 || link.next == u32::MAX || link.next <= pos {
+		// The last record carries no data and points nowhere.
+		if link.next == 0 || link.next == u32::MAX {
+			break;
+		}
+		// WinHelp 3.0 stores the distance to the next record; 3.1 stores its position. A
+		// 3.1 pointer that does not move forward would loop, so it ends the walk too.
+		let next = if before31 { pos.saturating_add(link.next) } else { link.next };
+		if next <= pos {
 			break;
 		}
 		let Some((data1, after_data1)) = read_stream(blocks, after_header, link.data_len1, LINK_LEN) else { break };
@@ -180,7 +192,7 @@ pub fn walk(blocks: &Blocks, phrases: &Phrases, fonts: &Fonts) -> Vec<Topic> {
 		match link.record_type {
 			// A header record too short to hold a TOPICHEADER is not one, whatever it
 			// claims, and treating it as one would end the topic that is open.
-			TL_TOPICHDR if data1.len() >= TOPIC_HEADER_LEN => {
+			TL_TOPICHDR if data1.len() >= header_len => {
 				topics.extend(current.take());
 				current =
 					Some(Topic { number, offset, title: text::decode_cstr(topic_title(&data2)), blocks: Vec::new() });
@@ -195,8 +207,8 @@ pub fn walk(blocks: &Blocks, phrases: &Phrases, fonts: &Fonts) -> Vec<Topic> {
 			}
 			_ => {}
 		}
-		offset = next_offset(offset, pos, link.next, blocks.stride);
-		pos = link.next;
+		offset = next_offset(offset, pos, next, blocks.stride);
+		pos = next;
 	}
 	topics.extend(current);
 	topics
@@ -385,7 +397,7 @@ mod tests {
 	fn a_topic_header_followed_by_text_makes_one_topic() {
 		let payload = chain(&[topic_header_parts("Intro"), display_parts("Body text.")]);
 		let b = blocks(&[payload], BLOCK_HEADER_LEN + 512);
-		let topics = walk(&b, &Phrases::default(), &Fonts::default());
+		let topics = walk(&b, &Phrases::default(), &Fonts::default(), false);
 		assert_eq!(topics.len(), 1);
 		assert_eq!(topics[0].title, "Intro");
 		assert_eq!(topics[0].number, FIRST_TOPIC_NUMBER);
@@ -401,7 +413,7 @@ mod tests {
 			display_parts("Two"),
 		]);
 		let b = blocks(&[payload], BLOCK_HEADER_LEN + 1024);
-		let topics = walk(&b, &Phrases::default(), &Fonts::default());
+		let topics = walk(&b, &Phrases::default(), &Fonts::default(), false);
 		assert_eq!(topics.len(), 2);
 		assert_eq!(topics[0].title, "First");
 		assert_eq!(topics[0].text(), "One");
@@ -416,7 +428,7 @@ mod tests {
 	fn several_records_accumulate_into_one_topic() {
 		let payload = chain(&[topic_header_parts("T"), display_parts("First."), display_parts("Second.")]);
 		let b = blocks(&[payload], BLOCK_HEADER_LEN + 512);
-		let topics = walk(&b, &Phrases::default(), &Fonts::default());
+		let topics = walk(&b, &Phrases::default(), &Fonts::default(), false);
 		assert_eq!(topics.len(), 1);
 		assert_eq!(
 			topics[0].text(),
@@ -431,7 +443,60 @@ Second."
 	fn the_terminating_record_is_not_a_topic() {
 		let payload = chain(&[]);
 		let b = blocks(&[payload], BLOCK_HEADER_LEN + 64);
-		assert!(walk(&b, &Phrases::default(), &Fonts::default()).is_empty());
+		assert!(walk(&b, &Phrases::default(), &Fonts::default(), false).is_empty());
+	}
+
+	/// Chain records the WinHelp 3.0 way: each names the distance to the next rather than
+	/// its position, and a topic header carries only the shorter 3.0 structure.
+	fn chain_30(parts: &[(u8, Vec<u8>, Vec<u8>)]) -> Vec<u8> {
+		let mut out = Vec::new();
+		for (kind, data1, data2) in parts {
+			let len = (LINK_LEN + data1.len() + data2.len()) as u32;
+			out.extend_from_slice(&record(*kind, len, data1, data2, data2.len() as u32));
+		}
+		out.extend_from_slice(&record(0, 0, &[], &[], 0));
+		out
+	}
+
+	// WinHelp 3.0 stores the distance to the next record where 3.1 stores its position.
+	// Reading one as the other walks off into the middle of the file immediately.
+	#[test]
+	fn a_30_file_follows_distances_rather_than_positions() {
+		let payload = chain_30(&[
+			(TL_TOPICHDR, vec![0u8; TOPIC_HEADER_LEN_30], b"First ".to_vec()),
+			(TL_DISPLAY30, display_30_commands(), b"Body. ".to_vec()),
+			(TL_TOPICHDR, vec![0u8; TOPIC_HEADER_LEN_30], b"Second ".to_vec()),
+		]);
+		let b = blocks(&[payload], BLOCK_HEADER_LEN + 512);
+		let topics = walk(&b, &Phrases::default(), &Fonts::default(), true);
+		assert_eq!(topics.len(), 2);
+		assert_eq!(topics[0].title, "First");
+		assert_eq!(topics[0].text(), "Body.");
+		assert_eq!(topics[1].title, "Second");
+	}
+
+	// A 3.0 topic header is twelve bytes, not twenty-eight. Holding out for the longer one
+	// would reject every header in the file and leave the walk with no topics at all.
+	#[test]
+	fn a_30_topic_header_is_accepted_at_its_own_length() {
+		let parts = vec![
+			(TL_TOPICHDR, vec![0u8; TOPIC_HEADER_LEN_30], b"Short ".to_vec()),
+			(TL_DISPLAY30, display_30_commands(), b"Text. ".to_vec()),
+		];
+		let b = blocks(&[chain_30(&parts)], BLOCK_HEADER_LEN + 512);
+		assert_eq!(walk(&b, &Phrases::default(), &Fonts::default(), true).len(), 1);
+		// The same file read as 3.1 finds no header long enough to start a topic.
+		assert!(walk(&b, &Phrases::default(), &Fonts::default(), false).is_empty());
+	}
+
+	/// `LinkData1` for a 3.0 display record, which has no topic length field.
+	fn display_30_commands() -> Vec<u8> {
+		let mut buf = Vec::new();
+		buf.extend_from_slice(&0x8000u16.to_le_bytes());
+		buf.extend_from_slice(&[0, 0, 0, 0]);
+		buf.extend_from_slice(&0u16.to_le_bytes());
+		buf.push(0xFF);
+		buf
 	}
 
 	// A next pointer that does not advance would spin forever on a damaged file.
@@ -439,13 +504,13 @@ Second."
 	fn a_record_pointing_at_itself_ends_the_walk() {
 		let payload = record(TL_TOPICHDR, BLOCK_HEADER_LEN as u32, &[0u8; TOPIC_HEADER_LEN], b"Loop ", 5);
 		let b = blocks(&[payload], BLOCK_HEADER_LEN + 256);
-		assert!(walk(&b, &Phrases::default(), &Fonts::default()).is_empty());
+		assert!(walk(&b, &Phrases::default(), &Fonts::default(), false).is_empty());
 	}
 
 	#[test]
 	fn an_empty_topic_file_yields_no_topics() {
 		let b = Blocks::new(&[], 512, STRIDE, false);
-		assert!(walk(&b, &Phrases::default(), &Fonts::default()).is_empty());
+		assert!(walk(&b, &Phrases::default(), &Fonts::default(), false).is_empty());
 	}
 
 	#[test]

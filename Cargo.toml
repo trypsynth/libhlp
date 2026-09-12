@@ -1,6 +1,6 @@
 [package]
 name = "libhlp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Pure-Rust reader for WinHelp (.hlp) files, with LZ77 and phrase decompression."
 edition = "2024"
 rust-version = "1.87"

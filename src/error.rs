@@ -37,11 +37,6 @@ pub enum HlpError {
 	/// The phrase table used for phrase or Hall decompression is malformed.
 	#[error("bad phrase table: {0}")]
 	BadPhrases(&'static str),
-	/// The file uses a format version this crate does not read yet.
-	///
-	/// WinHelp 3.0 (`HC30`, format version 15) files fall in here for now.
-	#[error("unsupported help file format version {0}")]
-	UnsupportedVersion(u16),
 	/// A length or offset calculation would overflow the target integer type.
 	#[error("integer overflow in offset calculation")]
 	Overflow,

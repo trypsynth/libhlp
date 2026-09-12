@@ -156,7 +156,7 @@ impl HlpFile {
 		let blocks = Blocks::new(raw, self.system.block_size, self.system.decompress_size, self.system.compressed);
 		let phrases = self.phrases();
 		let fonts = self.fonts();
-		let mut topics = topic::walk(&blocks, &phrases, &fonts);
+		let mut topics = topic::walk(&blocks, &phrases, &fonts, self.system.before31);
 		self.apply_stored_titles(&mut topics);
 		Ok(topics)
 	}
@@ -177,7 +177,9 @@ impl HlpFile {
 		if let (Ok(index), Ok(image)) = (self.read_file(PHRINDEX), self.read_file(PHRIMAGE)) {
 			return Phrases::parse_hall(index, image).unwrap_or_default();
 		}
-		self.read_file(PHRASES).ok().and_then(|buf| Phrases::parse_phrases(buf, false).ok()).unwrap_or_default()
+		// A WinHelp 3.0 phrase table stores its text as it stands rather than LZ77 compressed.
+		let before31 = self.system.before31;
+		self.read_file(PHRASES).ok().and_then(|buf| Phrases::parse_phrases(buf, before31).ok()).unwrap_or_default()
 	}
 
 	/// Fill in titles from `|TTLBTREE` for topics whose header carried none.

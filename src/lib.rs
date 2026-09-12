@@ -43,10 +43,15 @@
 //!
 //! # Which files are supported
 //!
-//! WinHelp 3.1 (`HC31`) and Windows 95 (`HCW 4.00`) files, including both phrase
-//! compression schemes. WinHelp 3.0 (`HC30`) files report
-//! [`HlpError::UnsupportedVersion`]; they use a different topic layout that is not read
-//! yet.
+//! WinHelp 3.0 (`HC30`), WinHelp 3.1 (`HC31`) and Windows 95 (`HCW 4.00`), including both
+//! phrase compression schemes.
+//!
+//! A WinHelp 3.0 file differs in more than its version number: smaller topic blocks that
+//! are never compressed, records that name the next by distance rather than position, a
+//! shorter topic header, an uncompressed phrase table, and hotspots that name their target
+//! by topic number rather than by context hash. All of that is handled, but it does mean
+//! [`Topic::offset`] is meaningless in such a file and [`Topic::number`] is the identity
+//! to use.
 //!
 //! Files from Borland's help compiler and MS-DOS QuickHelp share the `.hlp` extension but
 //! are unrelated formats. They are rejected with [`HlpError::BadMagic`].

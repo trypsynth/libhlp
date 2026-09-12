@@ -115,12 +115,17 @@ let bitmap = hlp.read_file("|bm0")?;
 
 | Format | Version | Status |
 | --- | --- | --- |
+| WinHelp 3.0 (`HC30`) | 15 | Read, with an uncompressed `\|Phrases` table |
 | WinHelp 3.1 (`HC31`) | 21 | Read, with `\|Phrases` compression |
 | Media view (`WMVC`/`MMVC`) | 27 | Read |
 | Windows 95 (`HCW 4.00`) | 33 | Read, with Hall (`\|PhrIndex`/`\|PhrImage`) compression |
-| WinHelp 3.0 (`HC30`) | 15 | Rejected with `HlpError::UnsupportedVersion` |
 
-WinHelp 3.0 uses a different topic layout and is not read yet.
+A WinHelp 3.0 file differs in more than its version number: 2k topic blocks that are never
+compressed, records that name the next by distance rather than by position, a twelve byte
+topic header, an uncompressed phrase table, bitmaps named `bmN` rather than `|bmN`, and
+hotspots that name their target by topic number rather than by context hash. All of that is
+handled, but it does mean `Topic::offset` is meaningless in such a file. Use `Topic::number`
+as the identity there, and match a `Target::Number` against it.
 
 Files from Borland's help compiler and MS-DOS QuickHelp share the `.hlp` extension but are unrelated formats. They are rejected with `HlpError::BadMagic`.
 
